@@ -49,7 +49,8 @@ from pycocotools import mask as maskUtils
 import zipfile
 import urllib.request
 import shutil
-
+import cv2
+from pathlib import Path
 # Root directory of the project
 ROOT_DIR = os.path.abspath("./")
 
@@ -57,6 +58,7 @@ ROOT_DIR = os.path.abspath("./")
 sys.path.append(ROOT_DIR)  # To find local version of the library
 from mrcnn.config import Config
 from mrcnn import model as modellib, utils
+from mrcnn import visualize
 
 # Path to pretrained coco weights file
 COCO_MODEL_PATH = os.path.join(ROOT_DIR, "mask_rcnn_coco.h5")
@@ -280,6 +282,78 @@ def build_coco_results(dataset, image_ids, rois, class_ids, scores, masks):
     return results
 
 
+class CustomCOCOeval(COCOeval):
+    """
+    override the COCOeval.summarize method
+    print mAP only and threshold from 0.5 to 0.95
+    """
+    def summarize(self):
+        '''
+        Compute and display summary metrics for evaluation results.
+        Note this functin can *only* be applied on the default parameter setting
+        '''
+        def _summarize( ap=1, iouThr=None, areaRng='all', maxDets=100 ):
+            p = self.params
+            iStr = ' {:<18} {} @[ IoU={:<9} | area={:>6s} | maxDets={:>3d} ] = {:0.3f}'
+            titleStr = 'Average Precision' if ap == 1 else 'Average Recall'
+            typeStr = '(AP)' if ap==1 else '(AR)'
+            iouStr = '{:0.2f}:{:0.2f}'.format(p.iouThrs[0], p.iouThrs[-1]) \
+                if iouThr is None else '{:0.2f}'.format(iouThr)
+
+            aind = [i for i, aRng in enumerate(p.areaRngLbl) if aRng == areaRng]
+            mind = [i for i, mDet in enumerate(p.maxDets) if mDet == maxDets]
+            if ap == 1:
+                # dimension of precision: [TxRxKxAxM]
+                s = self.eval['precision']
+                # IoU
+                if iouThr is not None:
+                    t = np.where(iouThr == p.iouThrs)[0]
+                    s = s[t]
+                s = s[:,:,:,aind,mind]
+            else:
+                # dimension of recall: [TxKxAxM]
+                s = self.eval['recall']
+                if iouThr is not None:
+                    t = np.where(iouThr == p.iouThrs)[0]
+                    s = s[t]
+                s = s[:,:,aind,mind]
+            if len(s[s>-1])==0:
+                mean_s = -1
+            else:
+                mean_s = np.mean(s[s>-1])
+            print(iStr.format(titleStr, typeStr, iouStr, areaRng, maxDets, mean_s))
+            return mean_s
+
+        def _summarizeDets():
+            stats = np.zeros((11,))
+            stats[0] = _summarize(1)
+            iouThres = np.linspace(0.5, 0.95, 10)
+            for i in range(len(iouThres)):
+                stats[i+1] = _summarize(1, iouThr=iouThres[i], maxDets=self.params.maxDets[2])
+            return stats
+
+        def _summarizeKps():
+            stats = np.zeros((10,))
+            stats[0] = _summarize(1, maxDets=20)
+            stats[1] = _summarize(1, maxDets=20, iouThr=.5)
+            stats[2] = _summarize(1, maxDets=20, iouThr=.75)
+            stats[3] = _summarize(1, maxDets=20, areaRng='medium')
+            stats[4] = _summarize(1, maxDets=20, areaRng='large')
+            stats[5] = _summarize(0, maxDets=20)
+            stats[6] = _summarize(0, maxDets=20, iouThr=.5)
+            stats[7] = _summarize(0, maxDets=20, iouThr=.75)
+            stats[8] = _summarize(0, maxDets=20, areaRng='medium')
+            stats[9] = _summarize(0, maxDets=20, areaRng='large')
+            return stats
+        if not self.eval:
+            raise Exception('Please run accumulate() first')
+        iouType = self.params.iouType
+        if iouType == 'segm' or iouType == 'bbox':
+            summarize = _summarizeDets
+        elif iouType == 'keypoints':
+            summarize = _summarizeKps
+        self.stats = summarize()
+
 def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=None):
     """Runs official COCO evaluation.
     dataset: A Dataset object with valiadtion data
@@ -321,7 +395,7 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
     coco_results = coco.loadRes(results)
 
     # Evaluate
-    cocoEval = COCOeval(coco, coco_results, eval_type)
+    cocoEval = CustomCOCOeval(coco, coco_results, eval_type)
     cocoEval.params.imgIds = coco_image_ids
     cocoEval.evaluate()
     cocoEval.accumulate()
@@ -336,8 +410,44 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
 #  Training
 ############################################################
 
+def predict_image(model, path:str, save_path:str):
+    """
+        using model to predict box, mask of a single image
+    """
+    img = cv2.imread(path)
+
+    results = model.detect([img], verbose=0)  
+    #results a list of dicts, one dict per image. The dict contains:
+    #rois: [N, (y1, x1, y2, x2)] detection bounding boxes
+    #class_ids: [N] int class IDs
+    #scores: [N] float probability scores for the class IDs
+    #masks: [H, W, N] instance binary masks
+
+    result = results[0]
+    
+    predicted_img = visualize.draw_predicted_image(img, result['rois'], result['masks'], result['class_ids'], 
+                                                ('BG',) + PASCAL_VOC_CLASSES, result['scores'])
+
+
+    cv2.imwrite(save_path, predicted_img)
+
+def predict_images(model, input_folder:str, output_folder:str):
+    if not os.path.exists(output_folder):
+        os.mkdir(output_folder)
+
+    print()
+    for p in Path(input_folder).glob('*'): 
+        path = str(p)
+        name = os.path.basename(path)
+        name = '.'.join(name.split('.')[:-1]) + '.png'
+        out_path = os.path.join(output_folder, name)
+
+        predict_image(model, path, out_path)
+        print(path + ' -> ' + out_path)
+    print('Done.')
 
 if __name__ == '__main__':
+
     import argparse
 
     # Parse command line arguments
@@ -346,7 +456,7 @@ if __name__ == '__main__':
     parser.add_argument("command",
                         metavar="<command>",
                         help="'train' or 'evaluate' model on dataset")
-    parser.add_argument('--dataset', required=True,
+    parser.add_argument('--dataset', required=False,
                         metavar="/path to dataset",
                         help='Directory of the dataset')
     parser.add_argument('--year', required=False,
@@ -364,14 +474,20 @@ if __name__ == '__main__':
                         default=500,
                         metavar="<image count>",
                         help='Images to use for evaluation (default=500)')
-                        
+
+    parser.add_argument('--images', default=None, type=str,
+                        help='An input folder of images for prediction.')
+    
+    parser.add_argument('--out_images', default=None, type=str,
+                        help='An output folder to save detected images')
+
     args = parser.parse_args()
     print("Command: ", args.command)
     print("Model: ", args.model)
     print("Dataset: ", args.dataset)
     print("Year: ", args.year)
     print("Logs: ", args.logs)
-    
+
 
     # Configurations
     if args.command == "train":
@@ -471,7 +587,14 @@ if __name__ == '__main__':
         print("-----------------------Running COCO evaluation on {} images-----------------------".format(limit))
 
         evaluate_coco(model, dataset_val, coco, "bbox", limit=int(args.limit))  
-        #evaluate_coco(model, dataset_val, coco, "segm", limit=int(args.limit))
+        evaluate_coco(model, dataset_val, coco, "segm", limit=int(args.limit))
+    elif args.command == "predict":
+        inp = args.images
+        out = args.out_images
+        assert args.images is not None, "--images should be specified"
+        assert args.out_images is not None, "--out_images should be specified"
+        predict_images(model, inp, out)
     else:
+        
         print("'{}' is not recognized. "
               "Use 'train' or 'evaluate'".format(args.command))

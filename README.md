@@ -101,5 +101,6 @@ Extract and put it into data/sbd folder. (the folder should have sbd/imgs and <a
 5. Run the desired command above for training or evaluating.
 
 # **Google Colab link demo:**
+https://colab.research.google.com/drive/15FYS9vpwYePy1G5yJsQj8KqXQbx3mKPa?usp=sharing
 
 
