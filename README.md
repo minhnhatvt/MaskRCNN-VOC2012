@@ -42,12 +42,16 @@ We also provide 4 step alternating training scheme of Faster RCNN by running
 ```
 python main_4stage.py train --dataset=data/sbd --model=imagenet
 ```
-
+## Evaluating
 You can also run the validation on the sbd_val subset by command:
 ```
 python main.py evaluate --dataset=data/sbd --model="path to weights.h5"
 ```
 
+For inference on images
+```
+python main.py predict --model="weights/mask_rcnn_pascal_sbd_2012_0139.h5" --images=test_images --out_images=test_images_out
+```
 The training schedule, learning rate, and other hyperparameters should be set in `mrcnn/config.py`.
 
 
